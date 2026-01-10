@@ -1,4 +1,4 @@
-# .github/workflows/netflix-watcher.yaml
+# .github/workflows/netflixwatcher.yml
 name: Netflix Watcher
 
 on:
@@ -15,39 +15,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # Expose secrets as environment variables for EVERYTHING in this job,
-    # so docker-compose/make can inherit them.
-    env:
-      EMAIL_IMAP: ${{ secrets.EMAIL_IMAP }}
-      EMAIL_LOGIN: ${{ secrets.EMAIL_LOGIN }}
-      EMAIL_PASSWORD: ${{ secrets.EMAIL_PASS }} # maps your secret -> code expects EMAIL_PASSWORD
-      NETFLIX_EMAIL_SENDER: ${{ secrets.NETFLIX_EMAIL_SENDER }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install make (and basic deps)
+      - name: Install make
         run: |
           sudo apt-get update
           sudo apt-get install -y make
 
-      - name: Sanity check env (keys only)
+      - name: Create .env for docker-compose (from secrets)
         shell: bash
         run: |
           set -euo pipefail
-          for k in EMAIL_IMAP EMAIL_LOGIN EMAIL_PASSWORD NETFLIX_EMAIL_SENDER; do
+
+          # Fail fast if any required secret is missing
+          for k in EMAIL_IMAP EMAIL_LOGIN EMAIL_PASS NETFLIX_EMAIL_SENDER; do
             if [ -z "${!k:-}" ]; then
-              echo "Missing env: $k"
+              echo "Missing secret/env: $k"
               exit 1
             fi
           done
-          echo "✅ All required env vars are present."
+
+          # IMPORTANT: your Python code uses EMAIL_PASSWORD, but your secret is EMAIL_PASS
+          cat > .env <<EOF
+          EMAIL_IMAP=${EMAIL_IMAP}
+          EMAIL_LOGIN=${EMAIL_LOGIN}
+          EMAIL_PASSWORD=${EMAIL_PASS}
+          NETFLIX_EMAIL_SENDER=${NETFLIX_EMAIL_SENDER}
+          EOF
+
+          echo "✅ .env created (keys only):"
+          cut -d= -f1 .env | sed 's/^/- /'
+
+        env:
+          EMAIL_IMAP: ${{ secrets.EMAIL_IMAP }}
+          EMAIL_LOGIN: ${{ secrets.EMAIL_LOGIN }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          NETFLIX_EMAIL_SENDER: ${{ secrets.NETFLIX_EMAIL_SENDER }}
 
       - name: Start containers
         run: make up
 
-      # Optional: give it a moment to do its work (adjust or remove)
+      # Give services time to start / do work (tune as needed)
       - name: Wait a bit
         run: sleep 60
 
