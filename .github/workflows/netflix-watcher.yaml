@@ -1,114 +1,89 @@
 # .github/workflows/netflixwatcher.yml
-# Strategy A with variable sleep and margin
-# Run every 30 minutes using cron
-# Do NOT use concurrency so overlapping runs are allowed
-# Overlap is acceptable and helps avoid gaps
-#
-# Continuous coverage logic
-# Cron interval is 30 minutes = 1800 seconds
-# To keep a safety margin for runner startup, image build, and service boot,
-# we enforce a minimum runtime of 35 minutes = 2100 seconds
-# Sleep duration is randomized between 2100 and 3600 seconds (35 to 60 minutes)
-#
-# Repository constraint
-# docker-compose.yml uses env_file: ./.env
-# Docker Compose will fail if .env does not exist
-# We generate .env at runtime from GitHub Secrets
-#
-# Environment mapping
-# GitHub Secret EMAIL_PASS is mapped to EMAIL_PASSWORD
-# because main.py reads EMAIL_PASSWORD from os.environ
+# This workflow runs the Netflix watcher as continuously as GitHub Actions allows.
+# It uses a scheduled trigger and long-running jobs with controlled overlap.
+# Overlap is intentional and helps avoid gaps when runners start slowly.
 
 name: NetflixWatcher
 
 on:
   workflow_dispatch:
   schedule:
-    # Run every 30 minutes
-    - cron: "*/30 * * * *"
+    # Trigger the workflow every 6 hours
+    # The job itself will usually run longer than this, creating overlap
+    - cron: "0 */6 * * *"
 
 jobs:
   watcher:
     runs-on: ubuntu-latest
 
-    # Worst case runtime
-    # 3600 seconds sleep = 60 minutes
-    # Plus build time, logs, cleanup
-    timeout-minutes: 90
+    # The job may sleep up to 6h15m, so we give it a comfortable buffer
+    # This stays under the practical GitHub Actions runtime limit
+    timeout-minutes: 400
 
     steps:
-      # Checkout repository source code
+      # Pull the repository so docker-compose.yml and the Dockerfile are available
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Create .env required by docker-compose.yml env_file
-      # Values are injected from GitHub Secrets
-      - name: Create .env from GitHub Secrets
+      # docker-compose.yml explicitly references ./.env via env_file
+      # Because of that, we must generate a .env file here from GitHub Secrets
+      - name: Create .env from secrets
         shell: bash
         run: |
           set -euo pipefail
 
-          # Validate required secrets exist
+          # Make sure all required secrets exist before continuing
           for k in EMAIL_IMAP EMAIL_LOGIN EMAIL_PASS NETFLIX_EMAIL_SENDER; do
             if [ -z "${!k:-}" ]; then
-              echo "Missing required secret/env: $k"
+              echo "Missing required secret: $k"
               exit 1
             fi
           done
 
-          # Generate .env file for Docker Compose
+          # main.py expects EMAIL_PASSWORD, so we map EMAIL_PASS to that name
           cat > .env <<EOF
           EMAIL_IMAP=${EMAIL_IMAP}
           EMAIL_LOGIN=${EMAIL_LOGIN}
           EMAIL_PASSWORD=${EMAIL_PASS}
           NETFLIX_EMAIL_SENDER=${NETFLIX_EMAIL_SENDER}
           EOF
-
-          # Print only keys, never values
-          echo "Environment variables loaded:"
-          cut -d= -f1 .env | sed 's/^/- /'
-
         env:
           EMAIL_IMAP: ${{ secrets.EMAIL_IMAP }}
           EMAIL_LOGIN: ${{ secrets.EMAIL_LOGIN }}
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           NETFLIX_EMAIL_SENDER: ${{ secrets.NETFLIX_EMAIL_SENDER }}
 
-      # Start Selenium + app containers
-      # Detached mode is required so the job can proceed to the sleep stage
+      # Start Selenium and the app in detached mode
+      # Detached is required so the job can continue to the sleep step
       - name: Start containers
         run: docker compose up -d --build
 
-      # Generate a random sleep duration with a safety margin
-      # Minimum is 2100 seconds (35 minutes)
-      # Maximum is 3600 seconds (60 minutes)
-      - name: Generate random sleep duration
+      # Pick a random runtime so the job does not always stop at the same time
+      # The minimum is 6 hours and the maximum is 6 hours and 15 minutes
+      # This creates overlap with the next scheduled run and adds jitter
+      - name: Generate sleep duration
         id: sleep_time
         shell: bash
         run: |
-          set -euo pipefail
-
-          MIN_SECONDS=2100
-          MAX_SECONDS=3600
-
+          MIN_SECONDS=21600
+          MAX_SECONDS=22500
           SLEEP_SECONDS=$((RANDOM % (MAX_SECONDS - MIN_SECONDS + 1) + MIN_SECONDS))
-
           echo "sleep_seconds=$SLEEP_SECONDS" >> "$GITHUB_OUTPUT"
           echo "Selected sleep duration: $SLEEP_SECONDS seconds"
 
-      # Keep containers alive for the randomly selected duration
+      # Keep the containers running for the selected amount of time
       - name: Keep containers alive
         run: sleep ${{ steps.sleep_time.outputs.sleep_seconds }}
 
-      # Always show container status and logs
-      # Helps debug IMAP issues, Netflix sender mismatch, selenium issues, etc.
-      - name: Show container logs
+      # Always print container status and recent logs for visibility
+      - name: Show logs
         if: always()
         run: |
           docker ps -a
           docker compose logs --no-color --tail=300
 
-      # Always stop and clean up containers and volumes
+      # Always clean up containers and volumes when the job ends
+      # This avoids leaking resources on the GitHub runner
       - name: Stop containers
         if: always()
         run: docker compose down -v
