@@ -1,16 +1,19 @@
 # .github/workflows/netflixwatcher.yml
-# Periodic execution of the Netflix watcher
-# Runs every 30 minutes using GitHub Actions
-# Each run keeps the Docker containers alive for a RANDOM amount of time
-# The sleep duration is generated at runtime between 60 and 3600 seconds
+# Strategy A with variable sleep and margin
+# Run every 30 minutes using cron
+# Do NOT use concurrency so overlapping runs are allowed
+# Overlap is acceptable and helps avoid gaps
 #
-# Concurrency behavior
-# Only one run is allowed at a time
-# cancel-in-progress is false, so new runs WAIT until the current one finishes
+# Continuous coverage logic
+# Cron interval is 30 minutes = 1800 seconds
+# To keep a safety margin for runner startup, image build, and service boot,
+# we enforce a minimum runtime of 35 minutes = 2100 seconds
+# Sleep duration is randomized between 2100 and 3600 seconds (35 to 60 minutes)
 #
 # Repository constraint
 # docker-compose.yml uses env_file: ./.env
-# This workflow generates .env dynamically from GitHub Secrets
+# Docker Compose will fail if .env does not exist
+# We generate .env at runtime from GitHub Secrets
 #
 # Environment mapping
 # GitHub Secret EMAIL_PASS is mapped to EMAIL_PASSWORD
@@ -24,27 +27,21 @@ on:
     # Run every 30 minutes
     - cron: "*/30 * * * *"
 
-# Ensure only one workflow run is active at a time
-# New runs are queued until the previous one finishes
-concurrency:
-  group: netflixwatcher
-  cancel-in-progress: false
-
 jobs:
   watcher:
-    # Single watcher job
     runs-on: ubuntu-latest
 
-    # Maximum runtime budget
-    # Worst case: 3600s sleep + build + logs + cleanup
-    timeout-minutes: 80
+    # Worst case runtime
+    # 3600 seconds sleep = 60 minutes
+    # Plus build time, logs, cleanup
+    timeout-minutes: 90
 
     steps:
       # Checkout repository source code
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Create the .env file required by docker-compose.yml
+      # Create .env required by docker-compose.yml env_file
       # Values are injected from GitHub Secrets
       - name: Create .env from GitHub Secrets
         shell: bash
@@ -67,7 +64,7 @@ jobs:
           NETFLIX_EMAIL_SENDER=${NETFLIX_EMAIL_SENDER}
           EOF
 
-          # Log variable names only
+          # Print only keys, never values
           echo "Environment variables loaded:"
           cut -d= -f1 .env | sed 's/^/- /'
 
@@ -77,34 +74,41 @@ jobs:
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           NETFLIX_EMAIL_SENDER: ${{ secrets.NETFLIX_EMAIL_SENDER }}
 
-      # Build images and start Selenium + app containers
+      # Start Selenium + app containers
+      # Detached mode is required so the job can proceed to the sleep stage
       - name: Start containers
         run: docker compose up -d --build
 
-      # Generate a random sleep duration between 60 and 3600 seconds
-      # This introduces jitter and reduces detection patterns
+      # Generate a random sleep duration with a safety margin
+      # Minimum is 2100 seconds (35 minutes)
+      # Maximum is 3600 seconds (60 minutes)
       - name: Generate random sleep duration
         id: sleep_time
         shell: bash
         run: |
-          SLEEP_SECONDS=$((RANDOM % (3600 - 60 + 1) + 60))
-          echo "sleep_seconds=$SLEEP_SECONDS" >> $GITHUB_OUTPUT
+          set -euo pipefail
+
+          MIN_SECONDS=2100
+          MAX_SECONDS=3600
+
+          SLEEP_SECONDS=$((RANDOM % (MAX_SECONDS - MIN_SECONDS + 1) + MIN_SECONDS))
+
+          echo "sleep_seconds=$SLEEP_SECONDS" >> "$GITHUB_OUTPUT"
           echo "Selected sleep duration: $SLEEP_SECONDS seconds"
 
-      # Keep containers alive for the randomly generated duration
-      - name: Keep containers alive (random duration)
+      # Keep containers alive for the randomly selected duration
+      - name: Keep containers alive
         run: sleep ${{ steps.sleep_time.outputs.sleep_seconds }}
 
       # Always show container status and logs
-      # Useful for debugging Selenium, IMAP, or Netflix issues
+      # Helps debug IMAP issues, Netflix sender mismatch, selenium issues, etc.
       - name: Show container logs
         if: always()
         run: |
           docker ps -a
           docker compose logs --no-color --tail=300
 
-      # Always shut down containers and remove volumes
-      # Ensures clean runner teardown
+      # Always stop and clean up containers and volumes
       - name: Stop containers
         if: always()
         run: docker compose down -v
