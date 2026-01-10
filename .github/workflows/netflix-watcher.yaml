@@ -1,53 +1,60 @@
 # .github/workflows/netflixwatcher.yml
-# Runs the Netflix Watcher using Docker Compose and Selenium
-# Secrets are injected at runtime and never committed
+# Periodic execution of the Netflix watcher
+# Runs every 30 minutes using GitHub Actions
+# Each run keeps the Docker containers alive for 35 minutes
+# Because 35 minutes is longer than the 30-minute schedule,
+# consecutive runs will overlap by approximately 5 minutes
+#
+# Important repository constraints
+# docker-compose.yml uses env_file: ./.env
+# This workflow must generate .env at runtime
+# The .env file is NOT committed to the repository
+#
+# Important environment mapping
+# GitHub Secret EMAIL_PASS is mapped to EMAIL_PASSWORD
+# because main.py reads EMAIL_PASSWORD from os.environ
 
 name: NetflixWatcher
 
-# Allows manual runs from GitHub UI
-# Also runs automatically on a daily schedule
 on:
   workflow_dispatch:
   schedule:
-    # Daily at 06:00 UTC
-    - cron: "0 6 * * *"
-
-# Prevents multiple runs from overlapping
-# If a new run starts, the previous one is cancelled
-concurrency:
-  group: netflixwatcher
-  cancel-in-progress: true
+    # Run every 30 minutes
+    - cron: "*/30 * * * *"
 
 jobs:
-  run:
-    # GitHub-hosted Linux runner
+  watcher:
+    # Single watcher job
     runs-on: ubuntu-latest
 
-    # Hard stop if something hangs
-    timeout-minutes: 30
+    # Total runtime budget
+    # 35 minutes sleep + build time + logs + cleanup
+    timeout-minutes: 55
 
     steps:
-      # Fetch repository source code
+      # Checkout repository source code
+      # Required to access docker-compose.yml and Dockerfile
       - name: Checkout repository
         uses: actions/checkout@v4
 
       # Create the .env file required by docker-compose.yml
-      # Values come from GitHub Secrets
-      # EMAIL_PASS is mapped to EMAIL_PASSWORD because main.py expects that name
-      - name: Create .env file from secrets
+      # Values are injected from GitHub Secrets
+      # Secrets must be configured in repository settings
+      - name: Create .env from GitHub Secrets
         shell: bash
         run: |
           set -euo pipefail
 
-          # Fail early if any required secret is missing
+          # Fail fast if any required secret is missing
           for k in EMAIL_IMAP EMAIL_LOGIN EMAIL_PASS NETFLIX_EMAIL_SENDER; do
             if [ -z "${!k:-}" ]; then
-              echo "Missing required secret: $k"
+              echo "Missing required secret/env: $k"
               exit 1
             fi
           done
 
           # Generate .env file for Docker Compose
+          # EMAIL_PASS is mapped to EMAIL_PASSWORD
           cat > .env <<EOF
           EMAIL_IMAP=${EMAIL_IMAP}
           EMAIL_LOGIN=${EMAIL_LOGIN}
@@ -55,7 +62,7 @@ jobs:
           NETFLIX_EMAIL_SENDER=${NETFLIX_EMAIL_SENDER}
           EOF
 
-          # Print only variable names to logs
+          # Log only variable names, never values
           echo "Environment variables loaded:"
           cut -d= -f1 .env | sed 's/^/- /'
 
@@ -66,25 +73,25 @@ jobs:
           NETFLIX_EMAIL_SENDER: ${{ secrets.NETFLIX_EMAIL_SENDER }}
 
       # Build images and start Selenium + app containers
-      # Uses Docker Compose v2 (docker compose)
+      # Detached mode allows the workflow to continue
       - name: Start containers
         run: docker compose up -d --build
 
-      # Give Selenium and the app time to start and perform work
-      # Adjust or remove if the app exits on its own
-      - name: Wait for execution
-        run: sleep 60
+      # Keep containers alive for 35 minutes
+      # This guarantees overlap between scheduled runs
+      - name: Keep containers alive
+        run: sleep 2100
 
-      # Always print container status and logs
-      # Useful for debugging failures or Netflix blocking
+      # Always show container status and logs
+      # Useful for debugging Selenium, IMAP, or Netflix issues
       - name: Show container logs
         if: always()
         run: |
           docker ps -a
           docker compose logs --no-color --tail=300
 
-      # Always shut everything down and clean volumes
-      # Prevents resource leaks on the GitHub runner
+      # Always shut down containers and remove volumes
+      # Ensures clean runner teardown
       - name: Stop containers
         if: always()
         run: docker compose down -v
