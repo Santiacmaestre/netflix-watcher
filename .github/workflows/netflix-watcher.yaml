@@ -1,43 +1,53 @@
 # .github/workflows/netflixwatcher.yml
-name: Netflix Watcher
+# Runs the Netflix Watcher using Docker Compose and Selenium
+# Secrets are injected at runtime and never committed
 
+name: NetflixWatcher
+
+# Allows manual runs from GitHub UI
+# Also runs automatically on a daily schedule
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 6 * * *" # daily 06:00 UTC
+    # Daily at 06:00 UTC
+    - cron: "0 6 * * *"
 
+# Prevents multiple runs from overlapping
+# If a new run starts, the previous one is cancelled
 concurrency:
   group: netflixwatcher
   cancel-in-progress: true
 
 jobs:
   run:
+    # GitHub-hosted Linux runner
     runs-on: ubuntu-latest
+
+    # Hard stop if something hangs
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      # Fetch repository source code
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install make
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y make
-
-      - name: Create .env for docker-compose (from secrets)
+      # Create the .env file required by docker-compose.yml
+      # Values come from GitHub Secrets
+      # EMAIL_PASS is mapped to EMAIL_PASSWORD because main.py expects that name
+      - name: Create .env file from secrets
         shell: bash
         run: |
           set -euo pipefail
 
-          # Fail fast if any required secret is missing
+          # Fail early if any required secret is missing
           for k in EMAIL_IMAP EMAIL_LOGIN EMAIL_PASS NETFLIX_EMAIL_SENDER; do
             if [ -z "${!k:-}" ]; then
-              echo "Missing secret/env: $k"
+              echo "Missing required secret: $k"
               exit 1
             fi
           done
 
-          # IMPORTANT: your Python code uses EMAIL_PASSWORD, but your secret is EMAIL_PASS
+          # Generate .env file for Docker Compose
           cat > .env <<EOF
           EMAIL_IMAP=${EMAIL_IMAP}
           EMAIL_LOGIN=${EMAIL_LOGIN}
@@ -45,7 +55,8 @@ jobs:
           NETFLIX_EMAIL_SENDER=${NETFLIX_EMAIL_SENDER}
           EOF
 
-          echo "✅ .env created (keys only):"
+          # Print only variable names to logs
+          echo "Environment variables loaded:"
           cut -d= -f1 .env | sed 's/^/- /'
 
         env:
@@ -54,21 +65,26 @@ jobs:
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           NETFLIX_EMAIL_SENDER: ${{ secrets.NETFLIX_EMAIL_SENDER }}
 
+      # Build images and start Selenium + app containers
+      # Uses Docker Compose v2 (docker compose)
       - name: Start containers
-        run: make up
+        run: docker compose up -d --build
 
-      # Give services time to start / do work (tune as needed)
-      - name: Wait a bit
+      # Give Selenium and the app time to start and perform work
+      # Adjust or remove if the app exits on its own
+      - name: Wait for execution
         run: sleep 60
 
-      - name: Logs (debug)
+      # Always print container status and logs
+      # Useful for debugging failures or Netflix blocking
+      - name: Show container logs
         if: always()
         run: |
           docker ps -a
-          docker compose logs --no-color --tail=300 || true
-          docker-compose logs --tail=300 || true
+          docker compose logs --no-color --tail=300
 
+      # Always shut everything down and clean volumes
+      # Prevents resource leaks on the GitHub runner
       - name: Stop containers
         if: always()
-        run: |
-          docker compose down -v || docker-compose down -v || true
+        run: docker compose down -v
