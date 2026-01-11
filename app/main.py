@@ -23,36 +23,46 @@ def extract_links(text):
     urls = re.findall(url_pattern, text)
     return urls
 
-
 def open_link_with_selenium(body):
     """Opens Selenium and clicks a button to confirm connection"""
+    print("Extracting links from email body...")
     links = extract_links(body)
+
     for link in links:
+        print(f"Found link: {link}")
         if "update-primary-location" in link:
+            print(f"Target confirmation link detected: {link}")
             options = webdriver.ChromeOptions()
             options.add_argument("--headless")
+
+            print("Connecting to remote Selenium server...")
             driver = webdriver.Remote(
                 command_executor='http://netflix_watcher_selenium:4444/wd/hub',
                 options=options
             )
 
+            print("Navigating to confirmation link...")
             driver.get(link)
-            time.sleep(3)
+            time.sleep(3)  # Give the page time to load
 
             try:
+                print("Waiting for confirmation button to be clickable...")
                 element = WebDriverWait(driver, 10).until(
                     EC.element_to_be_clickable((
                         By.CSS_SELECTOR, '[data-uia="set-primary-location-action"]'
                     ))
                 )
-
+                print("Clicking the confirmation button...")
                 element.click()
+                print("Confirmation button clicked successfully.")
             except TimeoutException as exception:
-                print("Error:", exception)
+                print("Error: Timed out waiting for confirmation button.", exception)
 
             time.sleep(3)
+            print("Closing Selenium browser.")
             driver.quit()
-
+        else:
+            print("This link does not match the confirmation URL pattern.")
 
 def fetch_last_unseen_email():
     """Gets body of last unseen mail from inbox"""
@@ -82,6 +92,11 @@ def fetch_last_unseen_email():
 
 
 if __name__ == "__main__":
+    print("Watcher started...")
     while True:
-        fetch_last_unseen_email()
+        try:
+            fetch_last_unseen_email()
+        except Exception as e:
+            print("Unhandled error:", e)
         time.sleep(10)
+
