@@ -1,38 +1,38 @@
 # .github/workflows/netflixwatcher.yml
-# This workflow runs the Netflix watcher as continuously as GitHub Actions allows.
-# It uses a scheduled trigger and long-running jobs with controlled overlap.
-# Overlap is intentional and helps avoid gaps when runners start slowly.
+# This workflow runs the Netflix watcher app on a schedule or manually.
+# It pulls email-based location confirmation links from Netflix and confirms them via Selenium automation.
 
 name: NetflixWatcher
 
 on:
+  # Allow manual trigger from the GitHub Actions UI
   workflow_dispatch:
+
+  # Run automatically every 5 hours
   schedule:
-    # Trigger the workflow every 6 hours
-    # The job itself will usually run longer than this, creating overlap
-    - cron: "0 */6 * * *"
+    - cron: "0 */5 * * *" # At minute 0, every 5th hour (00:00, 05:00, 10:00, etc.)
 
 jobs:
   watcher:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest # Use the latest Ubuntu runner provided by GitHub
 
-    # The job may sleep up to 6h15m, so we give it a comfortable buffer
-    # This stays under the practical GitHub Actions runtime limit
-    timeout-minutes: 400
+    # Give the job enough time to run (just under GitHub’s 6-hour limit)
+    timeout-minutes: 360 # 6 hours = 360 minutes (should be enough buffer for 5h runs)
 
     steps:
-      # Pull the repository so docker-compose.yml and the Dockerfile are available
+      # Step 1: Check out the repo so we can access the code and docker-compose files
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # docker-compose.yml explicitly references ./.env via env_file
-      # Because of that, we must generate a .env file here from GitHub Secrets
+      # Step 2: Create a .env file from GitHub Secrets
+      # These secrets are required for connecting to the email inbox
       - name: Create .env from secrets
         shell: bash
         run: |
+          # Stop immediately if anything fails or if any variable is missing
           set -euo pipefail
 
-          # Make sure all required secrets exist before continuing
+          # Check that all required secrets are available
           for k in EMAIL_IMAP EMAIL_LOGIN EMAIL_PASS NETFLIX_EMAIL_SENDER; do
             if [ -z "${!k:-}" ]; then
               echo "Missing required secret: $k"
@@ -40,7 +40,8 @@ jobs:
             fi
           done
 
-          # main.py expects EMAIL_PASSWORD, so we map EMAIL_PASS to that name
+          # Write environment variables to a .env file for use by docker-compose
+          # Note: the app expects EMAIL_PASSWORD, so we rename EMAIL_PASS
           cat > .env <<EOF
           EMAIL_IMAP=${EMAIL_IMAP}
           EMAIL_LOGIN=${EMAIL_LOGIN}
@@ -53,37 +54,25 @@ jobs:
           EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
           NETFLIX_EMAIL_SENDER: ${{ secrets.NETFLIX_EMAIL_SENDER }}
 
-      # Start Selenium and the app in detached mode
-      # Detached is required so the job can continue to the sleep step
+      # Step 3: Build and start the app and Selenium containers in the background
       - name: Start containers
         run: docker compose up -d --build
 
-      # Pick a random runtime so the job does not always stop at the same time
-      # The minimum is 6 hours and the maximum is 6 hours and 15 minutes
-      # This creates overlap with the next scheduled run and adds jitter
-      - name: Generate sleep duration
-        id: sleep_time
-        shell: bash
-        run: |
-          MIN_SECONDS=21600
-          MAX_SECONDS=22500
-          SLEEP_SECONDS=$((RANDOM % (MAX_SECONDS - MIN_SECONDS + 1) + MIN_SECONDS))
-          echo "sleep_seconds=$SLEEP_SECONDS" >> "$GITHUB_OUTPUT"
-          echo "Selected sleep duration: $SLEEP_SECONDS seconds"
+      # Step 4: Stream container logs in real-time
+      # This keeps the workflow job alive as long as the app is running
+      - name: Follow app logs
+        run: docker compose logs -f
 
-      # Keep the containers running for the selected amount of time
-      - name: Keep containers alive
-        run: sleep ${{ steps.sleep_time.outputs.sleep_seconds }}
-
-      # Always print container status and recent logs for visibility
-      - name: Show logs
+      # Step 5: Always print the status and recent logs when the job ends
+      # This helps with debugging if the app exits unexpectedly
+      - name: Show container status and recent logs
         if: always()
         run: |
           docker ps -a
           docker compose logs --no-color --tail=300
 
-      # Always clean up containers and volumes when the job ends
-      # This avoids leaking resources on the GitHub runner
+      # Step 6: Always shut down and clean up Docker resources when done
+      # Prevents leftovers on the GitHub runner
       - name: Stop containers
         if: always()
         run: docker compose down -v
