@@ -70,4 +70,4 @@ Edit your `.env` file with the following variables:
 1. Start the application with `make up`
 2. Go to Netflix on your TV and select "Verify with email"
 3. Watch as Netflix Watcher automatically completes the verification
-4. Enjoy your show!
+4. Enjoy your show :)!
